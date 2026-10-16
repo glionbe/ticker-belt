@@ -10,6 +10,7 @@
   var TAURI = window.__TAURI__ || null;
   var win = TAURI ? TAURI.window.getCurrentWindow() : null;
   var LogicalSize = TAURI ? TAURI.window.LogicalSize : null;
+  var invoke = TAURI && TAURI.core ? TAURI.core.invoke : null;
 
   var KEY = "tickerbelt.widget.v1";
 
@@ -25,7 +26,8 @@
     chg: "pct",
     theme: "dark",
     ontop: true,
-    hoverpause: true
+    hoverpause: true,
+    autostart: false
   };
 
   var SIZES = {
@@ -172,13 +174,72 @@
     inFlight = false;
   }
 
-  function tick() { if (live()) fetchQuotes(); else simulate(); }
+  // ---------------------------------------------------------- market hours
+  /* US equities trade 9:30-16:00 Eastern, Monday to Friday. This is worked
+   * out in America/New_York with Intl, never from the machine's local clock,
+   * so it's right from any time zone and across daylight-saving changes.
+   *
+   * Known limitation: there is no holiday calendar, so a market holiday counts
+   * as open. The cost is a little extra polling, which is harmless. */
+  var OPEN_SECS = 9 * 3600 + 30 * 60;     // 09:30 ET
+  var CLOSE_SECS = 16 * 3600;             // 16:00 ET
+  var CLOSED_EVERY = 5 * 60 * 1000;       // poll this slowly while closed
+  var DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  var ET_CLOCK = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York", weekday: "short",
+    hour: "numeric", minute: "numeric", second: "numeric", hourCycle: "h23"
+  });
+
+  function easternNow(d) {
+    var o = {};
+    ET_CLOCK.formatToParts(d).forEach(function (p) { o[p.type] = p.value; });
+    return {
+      day: DAYS.indexOf(o.weekday),
+      secs: Number(o.hour) * 3600 + Number(o.minute) * 60 + Number(o.second)
+    };
+  }
+
+  function marketOpen(d) {
+    var e = easternNow(d || new Date());
+    return e.day >= 1 && e.day <= 5 && e.secs >= OPEN_SECS && e.secs < CLOSE_SECS;
+  }
+
+  // How long to wait before the next poll.
+  function nextDelay() {
+    if (!live()) return 1600;
+    var every = settings.refresh * 1000;
+    var e = easternNow(new Date());
+    if (marketOpen()) return every;
+    var wait = CLOSED_EVERY;
+    // Before the bell on a weekday: wake up for the open instead of
+    // sleeping through up to five minutes of it.
+    if (e.day >= 1 && e.day <= 5 && e.secs < OPEN_SECS) {
+      wait = Math.min(wait, (OPEN_SECS - e.secs) * 1000 + 1000);
+    }
+    return wait;
+  }
+
+  // fetchQuotes() reports a timestamp on success. While the market is closed
+  // swap that for "Closed", but leave any error chip (Bad key, Offline, ...) alone.
+  function showClosed() {
+    if (!live() || marketOpen()) return;
+    if (!document.getElementById("dot").classList.contains("live")) return;
+    setStatus("", "Closed", "US market closed (9:30–16:00 ET, Mon–Fri). Showing the latest " +
+      "prices, checked at " + clockText() + ". Rechecking every 5 minutes.");
+  }
+
+  function tick() {
+    if (live()) fetchQuotes().then(showClosed); else simulate();
+  }
+
+  function run() {
+    tick();
+    timer = setTimeout(run, nextDelay());
+  }
 
   function schedule() {
-    clearInterval(timer);
-    var every = live() ? settings.refresh * 1000 : 1600;
-    timer = setInterval(tick, every);
-    tick();
+    clearTimeout(timer);
+    run();
   }
 
   // ------------------------------------------------------------- rendering
@@ -309,6 +370,7 @@
     document.getElementById("opacityVal").textContent = settings.opacity + "%";
     document.getElementById("ontop").checked = !!settings.ontop;
     document.getElementById("hoverpause").checked = !!settings.hoverpause;
+    document.getElementById("autostart").checked = !!settings.autostart;
 
     [["dir","dir"],["size","size"],["chg","chg"],["theme","theme"],
      ["width","width"],["refresh","refresh"]]
@@ -345,6 +407,11 @@
     if (win) win.close(); else window.close();
   });
 
+  // The tray's "Settings" item shows the window and asks us to open the panel.
+  if (TAURI && TAURI.event) {
+    TAURI.event.listen("open-settings", function () { togglePanel(true); }).catch(function () {});
+  }
+
   document.getElementById("symbols").addEventListener("change", function (e) {
     var list = readSymbols(e.target.value);
     settings.symbols = list.length ? list : DEFAULTS.symbols.slice();
@@ -377,6 +444,13 @@
   document.getElementById("hoverpause").addEventListener("change", function (e) {
     settings.hoverpause = e.target.checked; save();
   });
+  document.getElementById("autostart").addEventListener("change", function (e) {
+    var box = e.target, want = box.checked;
+    if (!invoke) { settings.autostart = want; save(); return; }   // plain browser
+    invoke("set_autostart", { enabled: want })
+      .then(function () { settings.autostart = want; save(); })
+      .catch(function () { box.checked = !want; });               // OS refused; keep the box honest
+  });
 
   segment("dir", "dir");
   segment("chg", "chg", null, function () { paint(); requestAnimationFrame(measure); });
@@ -387,8 +461,10 @@
 
   document.getElementById("reset").addEventListener("click", function () {
     var keepKey = settings.apiKey;           // resetting layout shouldn't log you out
+    var keepAuto = settings.autostart;       // ...or desync us from the OS startup entry
     settings = JSON.parse(JSON.stringify(DEFAULTS));
     settings.apiKey = keepKey;
+    settings.autostart = keepAuto;
     market = {}; save(); seedMarket(); applyChrome(); syncForm(); render(); resize(); schedule();
   });
 
@@ -422,6 +498,14 @@
   resize();
   schedule();
   requestAnimationFrame(frame);
+
+  // The OS startup entry is the truth (the user can also toggle it in Task
+  // Manager), so reflect it rather than trusting what we saved last time.
+  if (invoke) {
+    invoke("get_autostart").then(function (on) {
+      if (on !== settings.autostart) { settings.autostart = on; save(); syncForm(); }
+    }).catch(function () {});
+  }
 
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(measure);
   setTimeout(measure, 600);
