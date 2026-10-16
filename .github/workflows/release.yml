@@ -33,7 +33,11 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the installer so installed copies will trust the update.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
+          includeUpdaterJson: true   # attaches latest.json to the release
           tagName: ${{ github.ref_name }}
           releaseName: "Ticker Belt ${{ github.ref_name }}"
           releaseBody: "Download the .exe below and run it. Windows will show a SmartScreen warning because the app is unsigned — click More info, then Run anyway."

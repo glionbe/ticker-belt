@@ -32,6 +32,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
     "publisher": "George Lionberger",
     "shortDescription": "A scrolling stock ticker for your desktop",
     "icon": [
@@ -40,5 +41,14 @@
       "icons/128x128@2x.png",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI3RjY5MjRBQkIzRkRDM0QKUldROTNEKzdTcEwySjd5aGRpRXFKbjhYWnF6OERzZjVBUVpiZW1QSjc5ZUM3VWJvWmNiaEpuRmQK",
+      "endpoints": [
+        "https://github.com/glionbe/ticker-belt/releases/latest/download/latest.json"
+      ],
+      "windows": { "installMode": "passive" }
+    }
   }
 }

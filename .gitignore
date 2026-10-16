@@ -3,3 +3,9 @@ dist/
 src-tauri/target/
 src-tauri/gen/schemas/
 .DS_Store
+
+# Updater signing keys. The private key must never be committed; it lives in
+# ~/.tauri and in the TAURI_SIGNING_PRIVATE_KEY repo secret.
+*.key
+*.key.password
+.tauri/

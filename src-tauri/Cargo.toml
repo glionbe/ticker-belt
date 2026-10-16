@@ -3,15 +3,17 @@ name = "ticker-belt"
 version = "0.1.0"
 description = "A scrolling stock ticker for your desktop"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.90"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
+serde_json = "1"
 tauri-plugin-window-state = "2"
 tauri-plugin-autostart = "2"
+tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls"] }
 
 [profile.release]
 codegen-units = 1

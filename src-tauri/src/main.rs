@@ -7,7 +7,19 @@ use tauri::{
     AppHandle, Emitter, Manager, RunEvent, WindowEvent,
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri_plugin_updater::UpdaterExt;
 use tauri_plugin_window_state::StateFlags;
+
+/// Quiet launch-time update check. If a newer signed release exists it is
+/// downloaded and installed; on Windows the installer closes and relaunches
+/// the app. Any failure (offline, no release yet) is ignored on purpose.
+async fn check_for_update(app: AppHandle) -> tauri_plugin_updater::Result<()> {
+    if let Some(update) = app.updater()?.check().await? {
+        update.download_and_install(|_, _| {}, || {}).await?;
+        app.restart();
+    }
+    Ok(())
+}
 
 // The page has no bundler, so it can't import the autostart plugin's JS API.
 // These two commands wrap the plugin and are called with __TAURI__.core.invoke.
@@ -52,8 +64,18 @@ fn main() {
                 .build(),
         )
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![get_autostart, set_autostart])
         .setup(|app| {
+            // Release builds only: `tauri dev` has no signed release to compare to.
+            #[cfg(not(debug_assertions))]
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = check_for_update(handle).await;
+                });
+            }
+
             let toggle = MenuItem::with_id(app, "toggle", "Show/Hide", true, None::<&str>)?;
             let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
