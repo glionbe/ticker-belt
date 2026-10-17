@@ -13,9 +13,11 @@
   var invoke = TAURI && TAURI.core ? TAURI.core.invoke : null;
 
   var KEY = "tickerbelt.widget.v1";
+  var ALERT_KEY = "tickerbelt.alerts.v1";   // armed/triggered state, see checkAlerts()
 
   var DEFAULTS = {
     symbols: ["AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","JPM","V","SPY"],
+    alerts: {},             // { NVDA: ">150" } — only symbols that have a target
     apiKey: "",
     refresh: 30,
     speed: 55,
@@ -51,6 +53,7 @@
   var panelOpen = false;
   var timer = null;
   var inFlight = false;
+  var alertState = loadAlertState();
 
   // ------------------------------------------------------------------ state
   function load() {
@@ -64,6 +67,14 @@
       }
     } catch (e) {}
     if (!Array.isArray(s.symbols) || !s.symbols.length) s.symbols = DEFAULTS.symbols.slice();
+    // Settings saved before alerts existed have none, which is fine. Drop
+    // anything that doesn't parse or no longer matches a symbol in the list.
+    var alerts = {};
+    s.symbols.forEach(function (sym) {
+      var t = s.alerts && s.alerts[sym];
+      if (typeof t === "string" && parseTarget(t)) alerts[sym] = t;
+    });
+    s.alerts = alerts;
     return s;
   }
 
@@ -111,6 +122,7 @@
       m.last = Math.max(0.5, m.last + (Math.random() - 0.5) * m.last * 0.0016);
     }
     setStatus("", "Demo", "Simulated prices. Add an API key in settings for live quotes.");
+    checkAlerts();
     paint();
   }
 
@@ -170,6 +182,7 @@
     else if (got) setStatus("live", clockText(), "Live quotes, updated " + clockText() + ".");
     else setStatus("warn", "No data", "No symbols returned a price.");
 
+    checkAlerts();
     paint();
     inFlight = false;
   }
@@ -242,6 +255,78 @@
     run();
   }
 
+  // ---------------------------------------------------------- price alerts
+  /* Each alert is either armed (price on the near side of the target) or
+   * triggered (it has crossed). It notifies only on armed -> triggered, then
+   * stays quiet until the price goes back across and re-arms it. Without this
+   * every refresh would notify again for as long as the price stayed past.
+   *
+   * State is keyed by "NVDA>150", so editing a target starts it fresh, and is
+   * saved so a restart (including the updater's) doesn't re-notify. A target
+   * seen for the first time takes the current side as its baseline without
+   * notifying: if NVDA is already at 160 when you type NVDA>150 it highlights
+   * but doesn't notify, since nothing crossed. */
+  function loadAlertState() {
+    try {
+      var o = JSON.parse(localStorage.getItem(ALERT_KEY));
+      return o && typeof o === "object" ? o : {};
+    } catch (e) { return {}; }
+  }
+
+  function saveAlertState() {
+    var keep = {};   // forget targets that have been edited away
+    settings.symbols.forEach(function (sym) {
+      var id = settings.alerts[sym] ? sym + settings.alerts[sym] : null;
+      if (id && id in alertState) keep[id] = alertState[id];
+    });
+    alertState = keep;
+    try { localStorage.setItem(ALERT_KEY, JSON.stringify(alertState)); } catch (e) {}
+  }
+
+  // `was` is undefined (never seen), false (armed) or true (triggered).
+  function alertStep(was, hit) {
+    return { now: hit, fire: was === false && hit };
+  }
+
+  function checkAlerts() {
+    // Outside market hours live prices are the last close and don't move, so
+    // there's nothing to cross. Hold the current state until the open.
+    if (live() && !marketOpen()) return;
+
+    var changed = false;
+    settings.symbols.forEach(function (sym) {
+      var target = settings.alerts[sym], m = market[sym];
+      if (!target || !m || m.bad || !(m.last > 0)) return;
+      var t = parseTarget(target), id = sym + target;
+      var step = alertStep(alertState[id], t.op === ">" ? m.last > t.price : m.last < t.price);
+      if (step.fire) notifyAlert(sym, m.last, t);
+      if (alertState[id] !== step.now) { alertState[id] = step.now; changed = true; }
+    });
+
+    if (changed) {
+      saveAlertState();
+      requestAnimationFrame(measure);   // the ALERT tag changes the belt's width
+    }
+  }
+
+  function alertOn(sym) {
+    var t = settings.alerts[sym];
+    return !!t && alertState[sym + t] === true;
+  }
+
+  // The notification plugin replaces window.Notification with a version that
+  // goes through Tauri, so this is the plain web API. Skipped in a browser.
+  function notifyAlert(sym, price, t) {
+    if (!TAURI || typeof window.Notification !== "function") return;
+    var above = t.op === ">";
+    try {
+      new window.Notification(sym + (above ? " rose above " : " fell below ") + money(t.price), {
+        body: sym + " is at " + money(price) + ", " + (above ? "above" : "below") +
+              " your " + money(t.price) + " alert." + (live() ? "" : " (Demo prices.)")
+      });
+    } catch (e) {}
+  }
+
   // ------------------------------------------------------------- rendering
   function money(n) {
     return n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -265,8 +350,10 @@
     var s = document.createElement("span"); s.className = "sym"; s.textContent = sym;
     var p = document.createElement("span"); p.className = "px";
     var c = document.createElement("span"); c.className = "chg";
-    el.appendChild(s); el.appendChild(p); el.appendChild(c);
-    nodes[sym].push({ px: p, chg: c });
+    // Text tag, not just a tint: red/green already means up/down here.
+    var f = document.createElement("span"); f.className = "flag";
+    el.appendChild(s); el.appendChild(p); el.appendChild(c); el.appendChild(f);
+    nodes[sym].push({ el: el, px: p, chg: c, flag: f });
     return el;
   }
 
@@ -292,11 +379,13 @@
     settings.symbols.forEach(function (sym) {
       var m = market[sym];
       if (!m || !nodes[sym]) return;
-      var c = changeOf(m);
+      var c = changeOf(m), hit = alertOn(sym);
       nodes[sym].forEach(function (n) {
         n.px.textContent = c.px;
         n.chg.textContent = c.text;
         n.chg.className = "chg " + c.cls;
+        n.el.classList.toggle("hit", hit);
+        n.flag.textContent = hit ? "ALERT " + settings.alerts[sym] : "";
       });
     });
   }
@@ -362,7 +451,8 @@
 
   // ------------------------------------------------------------------ form
   function syncForm() {
-    document.getElementById("symbols").value = settings.symbols.join(", ");
+    document.getElementById("symbols").value = settings.symbols
+      .map(function (s) { return s + (settings.alerts[s] || ""); }).join(", ");
     document.getElementById("apikey").value = settings.apiKey;
     document.getElementById("speed").value = settings.speed;
     document.getElementById("speedVal").textContent = settings.speed;
@@ -392,13 +482,27 @@
     });
   }
 
+  // ">150" -> { op: ">", price: 150 }. Anything else (">abc", ">", ">0") is null.
+  function parseTarget(t) {
+    var m = /^([<>])(\d+(?:\.\d+)?|\.\d+)$/.exec(t);
+    return m && Number(m[2]) > 0 ? { op: m[1], price: Number(m[2]) } : null;
+  }
+
+  /* "AAPL, NVDA>150, TSLA < 300" -> symbols [AAPL, NVDA, TSLA] plus
+   * alerts { NVDA: ">150", TSLA: "<300" }. A target that doesn't parse leaves
+   * a plain symbol rather than dropping it. First mention of a symbol wins. */
   function readSymbols(raw) {
-    var list = raw.toUpperCase().split(/[,\s]+/)
-      .map(function (s) { return s.replace(/[^A-Z0-9.\-]/g, ""); })
-      .filter(Boolean);
-    var seen = {}, out = [];
-    list.forEach(function (s) { if (!seen[s] && out.length < 20) { seen[s] = 1; out.push(s); } });
-    return out;
+    var tokens = raw.toUpperCase().replace(/\s*([<>])\s*/g, "$1").split(/[,\s]+/);
+    var seen = {}, out = [], alerts = {};
+    tokens.forEach(function (tok) {
+      var cut = tok.search(/[<>]/);
+      var sym = (cut < 0 ? tok : tok.slice(0, cut)).replace(/[^A-Z0-9.\-]/g, "");
+      if (!sym || seen[sym] || out.length >= 20) return;
+      seen[sym] = 1; out.push(sym);
+      var target = cut < 0 ? "" : tok.slice(cut);
+      if (parseTarget(target)) alerts[sym] = target;
+    });
+    return { symbols: out, alerts: alerts };
   }
 
   // ------------------------------------------------------------------ wire
@@ -414,14 +518,17 @@
 
   document.getElementById("symbols").addEventListener("change", function (e) {
     var list = readSymbols(e.target.value);
-    settings.symbols = list.length ? list : DEFAULTS.symbols.slice();
+    settings.symbols = list.symbols.length ? list.symbols : DEFAULTS.symbols.slice();
+    settings.alerts = list.symbols.length ? list.alerts : {};
     market = {};
-    save(); seedMarket(); render(); syncForm(); schedule();
+    save(); saveAlertState(); seedMarket(); render(); syncForm(); schedule();
   });
 
   document.getElementById("apikey").addEventListener("change", function (e) {
     settings.apiKey = e.target.value.trim();
     market = {};
+    // Demo and live prices differ, so switching would look like a crossing.
+    alertState = {}; saveAlertState();
     save(); seedMarket(); schedule();
   });
 
@@ -465,7 +572,7 @@
     settings = JSON.parse(JSON.stringify(DEFAULTS));
     settings.apiKey = keepKey;
     settings.autostart = keepAuto;
-    market = {}; save(); seedMarket(); applyChrome(); syncForm(); render(); resize(); schedule();
+    market = {}; save(); saveAlertState(); seedMarket(); applyChrome(); syncForm(); render(); resize(); schedule();
   });
 
   var tape = document.getElementById("tape");

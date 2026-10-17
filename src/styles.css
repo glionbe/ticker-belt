@@ -12,6 +12,7 @@
   --chip:   rgba(255,255,255,0.12);
   --up:     #3DD68C;
   --down:   #FF6B72;
+  --alert:  #F0B429;         /* amber: not up, not down */
 
   --bar-h:  44px;
   --bar-fs: 15px;
@@ -27,6 +28,7 @@
   --chip:  rgba(0,0,0,0.08);
   --up:    #10893E;
   --down:  #D1333B;
+  --alert: #D99A00;
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -135,6 +137,17 @@ input[type="password"] {
 .px  { font-variant-numeric: tabular-nums; font-weight: 450; }
 .chg { font-variant-numeric: tabular-nums; font-size: calc(var(--bar-fs) - 1px); }
 .chg.up { color: var(--up); } .chg.down { color: var(--down); } .chg.flat { color: var(--muted); }
+
+/* A triggered price alert: amber wash and underline, plus an "ALERT >150"
+   tag so it reads without relying on color. */
+.quote.hit { background: color-mix(in srgb, var(--alert) 16%, transparent); box-shadow: inset 0 -3px 0 var(--alert); }
+.flag { display: none; }
+.quote.hit .flag {
+  display: inline-block;
+  padding: 1px 6px; border-radius: 4px;
+  background: var(--alert); color: #141A26;
+  font-size: calc(var(--bar-fs) - 4px); font-weight: 700; letter-spacing: 0.04em;
+}
 
 /* ---------- buttons ---------- */
 .controls { display: flex; align-items: center; gap: 2px; padding: 0 8px 0 4px; border-left: 1px solid var(--rule); flex: none; }

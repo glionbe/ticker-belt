@@ -12,6 +12,7 @@
     "core:window:allow-set-always-on-top",
     "core:window:allow-close",
     "core:window:allow-minimize",
-    "window-state:default"
+    "window-state:default",
+    "notification:default"
   ]
 }

@@ -65,6 +65,9 @@ fn main() {
         )
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Price alerts. Its init script swaps in window.Notification, so the
+        // page can use the plain web API with no bundler.
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![get_autostart, set_autostart])
         .setup(|app| {
             // Release builds only: `tauri dev` has no signed release to compare to.
