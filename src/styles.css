@@ -16,7 +16,9 @@
 
   --bar-h:  44px;
   --bar-fs: 15px;
-  --pad:    6px;             /* room around the pill for its shadow */
+  --pad:    6px;             /* transparent margin around the pill. No box-shadow:
+                                any blur wider than this is clipped by the window
+                                edge into a hard grey box on light backdrops. */
   --gap:    6px;             /* between the bar and the hover chart */
 }
 
@@ -60,7 +62,6 @@ body {
 .bar, .panel {
   background: rgba(var(--pill), var(--alpha));
   border: 1px solid var(--rule);
-  box-shadow: 0 6px 24px rgba(0,0,0,0.35);
   backdrop-filter: blur(14px);
 }
 
@@ -259,7 +260,6 @@ input:focus-visible, button:focus-visible { outline: 2px solid var(--ink); outli
   border-radius: 11px;
   background: rgba(var(--pill), var(--alpha));
   border: 1px solid var(--rule);
-  box-shadow: 0 6px 24px rgba(0,0,0,0.35);
   backdrop-filter: blur(14px);
 }
 .chart[data-dir="up"]   { --line: var(--up); }
