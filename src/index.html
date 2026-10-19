@@ -34,6 +34,23 @@
     </div>
   </div>
 
+  <!-- Hover chart. The window grows to make room, upward when the bar is low
+       on the screen; the page then runs bottom to top (.widget.up). -->
+  <div class="chartWrap" id="chartWrap" hidden>
+    <div class="chart" id="chart" data-dir="flat">
+      <div class="chartHead">
+        <span class="sym" id="cSym"></span>
+        <span class="px" id="cPx"></span>
+        <span class="chg" id="cChg"></span>
+      </div>
+      <div class="chartBody">
+        <svg id="cSvg" aria-hidden="true"></svg>
+        <div class="hilo"><span id="cHi"></span><span id="cLo"></span></div>
+        <div class="collecting">Collecting data…<span id="cWhen"></span></div>
+      </div>
+    </div>
+  </div>
+
   <!-- Settings. The window grows to make room for this when it opens. -->
   <div class="panel" id="panel" hidden>
     <div class="panelInner">

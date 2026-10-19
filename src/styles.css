@@ -17,6 +17,7 @@
   --bar-h:  44px;
   --bar-fs: 15px;
   --pad:    6px;             /* room around the pill for its shadow */
+  --gap:    6px;             /* between the bar and the hover chart */
 }
 
 :root[data-theme="light"] {
@@ -73,6 +74,12 @@ body {
 }
 .widget.open .bar { border-radius: 11px 11px 0 0; border-bottom: 0; }
 
+/* Bar low on the screen: the window grew upward, so stack from the bottom
+   and the bar stays put while the chart or settings open above it. */
+.widget.up { flex-direction: column-reverse; }
+.widget.up.open .bar { border-radius: 0 0 11px 11px; border-bottom: 1px solid var(--rule); border-top: 0; }
+.widget.up .panel { border-radius: 11px 11px 0 0; }
+
 /* ---------- status chip ---------- */
 .status {
   display: flex;
@@ -105,8 +112,9 @@ input[type="password"] {
 /* ---------- the tape ---------- */
 .tape { position: relative; flex: 1 1 auto; overflow: hidden; }
 
-/* pointer-events:none lets mousedown reach .tape, which carries the drag region.
-   Without this the .quote children swallow it and the window won't move. */
+/* pointer-events:none lets mousedown in the gaps reach .tape, which carries
+   the drag region. Quotes take events back for the hover chart, so each one
+   is a drag region of its own (data-tauri-drag-region="deep", set in app.js). */
 .track {
   display: flex;
   width: max-content;
@@ -132,6 +140,7 @@ input[type="password"] {
   border-right: 1px solid var(--rule);
   white-space: nowrap;
   font-size: var(--bar-fs);
+  pointer-events: auto;
 }
 .sym { font-weight: 650; letter-spacing: 0.02em; }
 .px  { font-variant-numeric: tabular-nums; font-weight: 450; }
@@ -208,3 +217,46 @@ input:focus-visible, button:focus-visible { outline: 2px solid var(--ink); outli
 }
 .btn:hover { background: var(--chip); }
 .foot .hint { margin: 0; }
+
+/* ---------- hover chart ---------- */
+.chartWrap { flex: none; padding-top: var(--gap); }
+.widget.up .chartWrap { padding-top: 0; padding-bottom: var(--gap); }
+
+.chart {
+  --line: var(--muted);
+  width: 300px;
+  padding: 11px 13px 12px;
+  border-radius: 11px;
+  background: rgba(var(--pill), var(--alpha));
+  border: 1px solid var(--rule);
+  box-shadow: 0 6px 24px rgba(0,0,0,0.35);
+  backdrop-filter: blur(14px);
+}
+.chart[data-dir="up"]   { --line: var(--up); }
+.chart[data-dir="down"] { --line: var(--down); }
+
+.chartHead { display: flex; align-items: baseline; gap: 8px; height: 20px; font-size: 13.5px; white-space: nowrap; }
+.chartHead .chg { font-size: 12.5px; }
+
+.chartBody { position: relative; display: flex; gap: 8px; height: 92px; margin-top: 8px; }
+.chartBody svg { flex: 1 1 auto; min-width: 0; height: 100%; overflow: visible; }
+.hilo {
+  display: flex; flex-direction: column; justify-content: space-between; align-items: flex-end;
+  flex: none; min-width: 48px;
+  font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.chart .line { fill: none; stroke: var(--line); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+.chart .fade0 { stop-color: var(--line); stop-opacity: 0.26; }
+.chart .fade1 { stop-color: var(--line); stop-opacity: 0; }
+.chart .prev { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 2 3; opacity: 0.55; shape-rendering: crispEdges; }
+
+/* Not enough points for a line yet: no chart, just say so. */
+.collecting {
+  display: none; position: absolute; inset: 0;
+  flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  font-size: 12.5px; color: var(--muted);
+}
+.collecting span { font-size: 11px; opacity: 0.8; }
+.collecting span:empty { display: none; }
+.chart.empty .collecting { display: flex; }
+.chart.empty svg, .chart.empty .hilo { visibility: hidden; }

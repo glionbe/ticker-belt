@@ -1,6 +1,6 @@
 [package]
 name = "ticker-belt"
-version = "0.2.1"
+version = "0.3.0"
 description = "A scrolling stock ticker for your desktop"
 edition = "2021"
 rust-version = "1.90"

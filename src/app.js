@@ -9,11 +9,14 @@
   // --- Tauri bridge (withGlobalTauri: true means no bundler, no imports) ---
   var TAURI = window.__TAURI__ || null;
   var win = TAURI ? TAURI.window.getCurrentWindow() : null;
-  var LogicalSize = TAURI ? TAURI.window.LogicalSize : null;
+  var PhysicalSize = TAURI ? TAURI.window.PhysicalSize : null;
+  var PhysicalPosition = TAURI ? TAURI.window.PhysicalPosition : null;
   var invoke = TAURI && TAURI.core ? TAURI.core.invoke : null;
 
   var KEY = "tickerbelt.widget.v1";
   var ALERT_KEY = "tickerbelt.alerts.v1";   // armed/triggered state, see checkAlerts()
+  var HIST_KEY = "tickerbelt.history.v1.";  // + symbol: today's prices, see recordLive()
+  var GEO_KEY = "tickerbelt.geo.v1";        // how far the window is grown upward, see applyLayout()
 
   var DEFAULTS = {
     symbols: ["AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","JPM","V","SPY"],
@@ -111,6 +114,7 @@
       if (market[sym]) return;
       var p = basePrice(sym);
       market[sym] = { prev: p, last: p * (1 + (Math.random() - 0.48) * 0.02) };
+      demoHist[sym] = [];   // a fresh demo price starts a fresh demo chart
     });
   }
 
@@ -242,7 +246,8 @@
   }
 
   function tick() {
-    if (live()) fetchQuotes().then(showClosed); else simulate();
+    if (live()) fetchQuotes().then(showClosed).then(recordLive).then(drawChart);
+    else { simulate(); recordDemo(); drawChart(); }
   }
 
   function run() {
@@ -253,6 +258,100 @@
   function schedule() {
     clearTimeout(timer);
     run();
+  }
+
+  // --------------------------------------------------------------- history
+  /* The hover chart draws prices we've seen ourselves; there's no history
+   * API. Each live quote that arrives while the market is open is appended
+   * as [ms, price] under HIST_KEY + symbol, tagged with its session day.
+   * Closed-market polls are skipped, or the 5-minute overnight checks would
+   * draw a flat line through to the next open.
+   *
+   * Only the latest session is kept. Older days are dropped on startup, and
+   * a record from an older day starts over on its next append (the app may
+   * run across days). Past MAX_POINTS the series is thinned to every other
+   * point rather than trimmed, so a 15-second refresh still covers the day.
+   *
+   * Storage can throw (quota, blocked, ...), so writes are best-effort and
+   * the chart reads the copy in memory. Demo prices stay in memory only, so
+   * they never mix with real ones. */
+  var MAX_POINTS = 1000;
+  var hist = {};                // live: sym -> { day: "2026-10-16", pts: [[ms, price], ...] }
+  var demoHist = {};            // demo: sym -> [[ms, price], ...]
+  var recorded = new WeakSet(); // quotes already seen; fetchQuotes() makes a new object per fresh quote
+  var ET_DATE = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit"
+  });
+
+  function etDate(t) {
+    var o = {};
+    ET_DATE.formatToParts(new Date(t)).forEach(function (p) { o[p.type] = p.value; });
+    return o.year + "-" + o.month + "-" + o.day;
+  }
+
+  // The ET date of the latest session that has started: today after the
+  // open, otherwise the last weekday before. Before Monday's bell that's
+  // Friday, which is also the session Finnhub's last price belongs to.
+  function sessionDay(d) {
+    var t = d.getTime(), e = easternNow(d);
+    if (!(e.day >= 1 && e.day <= 5 && e.secs >= OPEN_SECS)) {
+      // Step to the last second of the previous ET day until it's a weekday.
+      do { t -= (e.secs + 1) * 1000; e = easternNow(new Date(t)); } while (e.day < 1 || e.day > 5);
+    }
+    return etDate(t);
+  }
+
+  function thin(pts) {
+    if (pts.length <= MAX_POINTS) return pts;
+    return pts.filter(function (p, i) { return i % 2 === 0 || i === pts.length - 1; });
+  }
+
+  function loadHistory() {
+    var day = sessionDay(new Date()), stale = [];
+    try {
+      for (var i = 0; i < localStorage.length; i++) {
+        var k = localStorage.key(i);
+        if (!k || k.indexOf(HIST_KEY) !== 0) continue;
+        var rec = null;
+        try { rec = JSON.parse(localStorage.getItem(k)); } catch (e) {}
+        if (rec && rec.day === day && Array.isArray(rec.pts)) hist[k.slice(HIST_KEY.length)] = rec;
+        else stale.push(k);
+      }
+      stale.forEach(function (k) { localStorage.removeItem(k); });
+    } catch (e) {}
+  }
+
+  function recordLive() {
+    var open = marketOpen(), day = open ? sessionDay(new Date()) : null, now = Date.now();
+    settings.symbols.forEach(function (sym) {
+      var m = market[sym];
+      if (!m || m.bad || !(m.last > 0) || recorded.has(m)) return;
+      // Marked even while closed, so a pre-open quote isn't logged at the bell.
+      recorded.add(m);
+      if (!open) return;
+      var rec = hist[sym];
+      if (!rec || rec.day !== day) rec = hist[sym] = { day: day, pts: [] };
+      rec.pts.push([now, m.last]);
+      rec.pts = thin(rec.pts);
+      try { localStorage.setItem(HIST_KEY + sym, JSON.stringify(rec)); } catch (e) {}
+    });
+  }
+
+  function recordDemo() {
+    var now = Date.now();
+    settings.symbols.forEach(function (sym) {
+      var m = market[sym];
+      if (!m || m.bad) return;
+      var pts = demoHist[sym] || (demoHist[sym] = []);
+      pts.push([now, m.last]);
+      demoHist[sym] = thin(pts);
+    });
+  }
+
+  function seriesFor(sym) {
+    if (!live()) return demoHist[sym] || [];
+    var rec = hist[sym];
+    return rec && rec.day === sessionDay(new Date()) ? rec.pts : [];
   }
 
   // ---------------------------------------------------------- price alerts
@@ -347,6 +446,11 @@
   function buildQuote(sym) {
     var el = document.createElement("div");
     el.className = "quote";
+    // The quote takes pointer events now (for the hover chart), so it needs
+    // its own drag region. "deep" so a press on the text inside drags too.
+    el.setAttribute("data-tauri-drag-region", "deep");
+    el.addEventListener("mouseenter", function () { hoverQuote(sym, el); });
+    el.addEventListener("mouseleave", leaveSoon);
     var s = document.createElement("span"); s.className = "sym"; s.textContent = sym;
     var p = document.createElement("span"); p.className = "px";
     var c = document.createElement("span"); c.className = "chg";
@@ -406,12 +510,151 @@
     lastT = t;
 
     if (!copyW) { measure(); return; }
-    if (hovering && settings.hoverpause) return;
+    if (chart || (hovering && settings.hoverpause)) return;   // can't read a chart on a moving quote
 
     offset += (settings.dir === "right" ? -1 : 1) * settings.speed * dt;
     offset = ((offset % copyW) + copyW) % copyW;
     document.getElementById("track").style.transform =
       "translate3d(" + (-offset).toFixed(2) + "px, 0, 0)";
+  }
+
+  // ------------------------------------------------------- the hover chart
+  /* Hovering a quote for OPEN_DELAY opens a small chart of today's prices,
+   * attached above or below the bar (see applyLayout). It closes once the
+   * pointer has been off both the quote and the chart for CLOSE_GRACE, which
+   * also covers crossing the gap between them. The belt holds still while
+   * it's open, whatever the hover-pause setting says.
+   *
+   * Settings wins over the chart: opening settings closes it, and it won't
+   * open while settings is up. So the window only ever makes room for one. */
+  var OPEN_DELAY = 200, CLOSE_GRACE = 150;
+  var chart = null;          // { sym, el } while open
+  var openTimer = null, closeTimer = null;
+  var pressed = false;       // mouse held on the tape, maybe dragging the window
+  var SVG_NS = "http://www.w3.org/2000/svg";
+
+  function hoverQuote(sym, el) {
+    clearTimeout(closeTimer);
+    clearTimeout(openTimer);
+    if (chart && chart.el === el) return;
+    openTimer = setTimeout(function () {
+      if (pressed || panelOpen || !el.matches(":hover")) return;
+      openChart(sym, el);
+    }, OPEN_DELAY);
+  }
+
+  function leaveSoon() {
+    clearTimeout(openTimer);
+    clearTimeout(closeTimer);
+    closeTimer = setTimeout(function () {
+      // Don't resize the window mid-drag; release() checks again after.
+      if (!chart || pressed) return;
+      if (chart.el.matches(":hover") || document.getElementById("chart").matches(":hover")) return;
+      closeChart();
+    }, CLOSE_GRACE);
+  }
+
+  function release() {
+    if (!pressed) return;
+    pressed = false;
+    if (chart) leaveSoon();
+  }
+
+  function openChart(sym, el) {
+    var m = market[sym];
+    if (!m || m.bad) return;
+    var swap = !!chart;
+    chart = { sym: sym, el: el };
+    var wrap = document.getElementById("chartWrap");
+    var card = document.getElementById("chart");
+    wrap.hidden = false;
+    // Line the card up with the quote, kept inside the window.
+    var room = wrap.clientWidth - card.offsetWidth;
+    var x = el.getBoundingClientRect().left - wrap.getBoundingClientRect().left;
+    card.style.marginLeft = Math.max(0, Math.min(room, Math.round(x))) + "px";
+    drawChart();
+    if (!swap) layout();     // moving to another quote reuses the room already made
+  }
+
+  function closeChart() {
+    clearTimeout(openTimer);
+    clearTimeout(closeTimer);
+    if (!chart) return;
+    chart = null;
+    document.getElementById("chartWrap").hidden = true;
+    layout();
+  }
+
+  function chartHeight() {
+    if (!chart) return 0;
+    return Math.ceil(document.getElementById("chartWrap").getBoundingClientRect().height);
+  }
+
+  function svgEl(tag, attrs) {
+    var el = document.createElementNS(SVG_NS, tag);
+    for (var k in attrs) el.setAttribute(k, attrs[k]);
+    return el;
+  }
+
+  function drawChart() {
+    if (!chart) return;
+    var sym = chart.sym, m = market[sym];
+    if (!m || m.bad) { closeChart(); return; }
+    var c = changeOf(m), pts = seriesFor(sym);
+    var card = document.getElementById("chart");
+    var svg = document.getElementById("cSvg");
+
+    card.setAttribute("data-dir", c.cls);
+    document.getElementById("cSym").textContent = sym;
+    document.getElementById("cPx").textContent = c.px;
+    var chg = document.getElementById("cChg");
+    chg.textContent = c.text;
+    chg.className = "chg " + c.cls;
+
+    // Fewer than three points isn't a line yet.
+    var enough = pts.length >= 3;
+    card.classList.toggle("empty", !enough);
+    document.getElementById("cWhen").textContent =
+      live() && !marketOpen() ? "Fills in while the market is open." : "";
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    if (!enough) return;
+
+    var w = svg.clientWidth, h = svg.clientHeight, inset = 3;
+    svg.setAttribute("viewBox", "0 0 " + w + " " + h);
+
+    // On live data x spans the whole session, so the line works its way
+    // across as the day goes on. Demo ticks are seconds apart: fit the data.
+    var t0 = pts[0][0], t1 = pts[pts.length - 1][0];
+    if (live()) {
+      var open = t0 - (easternNow(new Date(t0)).secs - OPEN_SECS) * 1000;
+      t0 = Math.min(t0, open);
+      t1 = Math.max(t1, open + (CLOSE_SECS - OPEN_SECS) * 1000);
+    }
+
+    var lo = Infinity, hi = -Infinity;
+    pts.forEach(function (p) { lo = Math.min(lo, p[1]); hi = Math.max(hi, p[1]); });
+    document.getElementById("cHi").textContent = money(hi);
+    document.getElementById("cLo").textContent = money(lo);
+    // Keep the previous close in frame so its line always shows.
+    var prev = m.prev > 0 ? m.prev : null;
+    var top = prev ? Math.max(hi, prev) : hi, bot = prev ? Math.min(lo, prev) : lo;
+    if (top - bot < top * 1e-6) { top *= 1.001; bot *= 0.999; }   // flat: centre it
+
+    function X(t) { return ((t - t0) / ((t1 - t0) || 1) * w).toFixed(1); }
+    function Y(p) { return (inset + (top - p) / (top - bot) * (h - inset * 2)).toFixed(1); }
+
+    var line = pts.map(function (p, i) { return (i ? "L" : "M") + X(p[0]) + " " + Y(p[1]); }).join("");
+    var area = line + "L" + X(pts[pts.length - 1][0]) + " " + h + "L" + X(pts[0][0]) + " " + h + "Z";
+
+    var grad = svgEl("linearGradient", { id: "cFade", x1: 0, y1: 0, x2: 0, y2: 1 });
+    grad.appendChild(svgEl("stop", { offset: 0, "class": "fade0" }));
+    grad.appendChild(svgEl("stop", { offset: 1, "class": "fade1" }));
+    var defs = svgEl("defs", {});
+    defs.appendChild(grad);
+    svg.appendChild(defs);
+    svg.appendChild(svgEl("path", { d: area, "class": "area", fill: "url(#cFade)" }));
+    if (prev) svg.appendChild(svgEl("line", { x1: 0, x2: w, y1: Y(prev), y2: Y(prev), "class": "prev" }));
+    svg.appendChild(svgEl("path", { d: line, "class": "line" }));
   }
 
   // ----------------------------------------------------------- the window
@@ -424,10 +667,73 @@
     return Math.min(h, MAX_PANEL);
   }
 
-  function resize() {
-    if (!win || !LogicalSize) return;
-    var h = barHeight() + PAD * 2 + panelHeight();
-    win.setSize(new LogicalSize(settings.width, h)).catch(function () {});
+  /* The window is the bar plus whatever is open (settings or the chart).
+   * With the bar in the top half of its monitor that grows downward: size
+   * only. In the bottom half it grows upward, so the window also moves up by
+   * the same amount and the page flips to column-reverse, which keeps the
+   * bar where it was on screen.
+   *
+   * All of this is in physical pixels. Position and monitor come back
+   * physical and the scale factor needn't be 1 (or the same per monitor), so
+   * the logical heights are converted once here and the size is set as
+   * physical too. Everything is read fresh each call since the widget moves.
+   *
+   * `geo` is what the window has right now: how much extra height, and
+   * whether it went upward. The window-state plugin saves the position as it
+   * is at quit, so geo is saved as well and the next launch undoes it.
+   * Calls are queued so a quick open-then-close can't interleave. */
+  var geo = loadGeo();
+  var geoQueue = Promise.resolve();
+
+  function loadGeo() {
+    try {
+      var g = JSON.parse(localStorage.getItem(GEO_KEY));
+      if (g && g.up && g.extra > 0) return { extra: g.extra, up: true };
+    } catch (e) {}
+    return { extra: 0, up: false };
+  }
+
+  function saveGeo() {
+    try {
+      if (geo.up) localStorage.setItem(GEO_KEY, JSON.stringify(geo));
+      else localStorage.removeItem(GEO_KEY);
+    } catch (e) {}
+  }
+
+  function layout() {
+    geoQueue = geoQueue.then(applyLayout).catch(function () {});
+  }
+
+  async function applyLayout() {
+    var widget = document.getElementById("widget");
+    var want = panelOpen ? panelHeight() : chartHeight();    // logical px
+    if (!win || !PhysicalSize) { widget.classList.remove("up"); return; }
+
+    var f = await win.scaleFactor();
+    var pos = await win.outerPosition();
+    var mon = await TAURI.window.currentMonitor();
+
+    var baseH = Math.round((barHeight() + PAD * 2) * f);
+    var width = Math.round(settings.width * f);
+    var top = pos.y + (geo.up ? geo.extra : 0);   // the window's top with nothing open
+    var up = false, room = Infinity;
+    if (mon) {
+      // The work area leaves out the taskbar.
+      var area = mon.workArea || { position: mon.position, size: mon.size };
+      up = top + baseH / 2 > mon.position.y + mon.size.height / 2;
+      room = up ? top - area.position.y
+                : area.position.y + area.size.height - (top + baseH);
+    }
+    var extra = Math.max(0, Math.min(Math.round(want * f), room));
+    var y = up ? top - extra : top;
+
+    widget.classList.toggle("up", up);
+    geo = { extra: extra, up: up && extra > 0 };
+    saveGeo();
+    // Sent together so the resize and the move land as close as possible.
+    var jobs = [win.setSize(new PhysicalSize(width, baseH + extra))];
+    if (y !== pos.y) jobs.push(win.setPosition(new PhysicalPosition(pos.x, y)));
+    await Promise.all(jobs);
   }
 
   function applyChrome() {
@@ -443,10 +749,15 @@
 
   function togglePanel(open) {
     panelOpen = open === undefined ? !panelOpen : open;
+    if (panelOpen && chart) {             // settings takes the room, see the hover chart
+      clearTimeout(closeTimer);
+      chart = null;
+      document.getElementById("chartWrap").hidden = true;
+    }
     document.getElementById("panel").hidden = !panelOpen;
     document.getElementById("widget").classList.toggle("open", panelOpen);
     // Unhide first so the panel has a real height to measure.
-    requestAnimationFrame(function () { resize(); requestAnimationFrame(measure); });
+    requestAnimationFrame(function () { layout(); requestAnimationFrame(measure); });
   }
 
   // ------------------------------------------------------------------ form
@@ -562,8 +873,8 @@
   segment("dir", "dir");
   segment("chg", "chg", null, function () { paint(); requestAnimationFrame(measure); });
   segment("theme", "theme");
-  segment("size", "size", null, function () { resize(); requestAnimationFrame(measure); });
-  segment("width", "width", Number, function () { resize(); requestAnimationFrame(measure); });
+  segment("size", "size", null, function () { layout(); requestAnimationFrame(measure); });
+  segment("width", "width", Number, function () { layout(); requestAnimationFrame(measure); });
   segment("refresh", "refresh", Number, schedule);
 
   document.getElementById("reset").addEventListener("click", function () {
@@ -572,12 +883,24 @@
     settings = JSON.parse(JSON.stringify(DEFAULTS));
     settings.apiKey = keepKey;
     settings.autostart = keepAuto;
-    market = {}; save(); saveAlertState(); seedMarket(); applyChrome(); syncForm(); render(); resize(); schedule();
+    market = {}; save(); saveAlertState(); seedMarket(); applyChrome(); syncForm(); render(); layout(); schedule();
   });
 
   var tape = document.getElementById("tape");
   tape.addEventListener("mouseenter", function () { hovering = true; });
   tape.addEventListener("mouseleave", function () { hovering = false; });
+  // A press may turn into a window drag: leave the chart as it is until it
+  // ends. After a native drag the page may never get the mouseup, so a move
+  // with no button held counts as the release too.
+  tape.addEventListener("mousedown", function (e) {
+    if (e.button === 0) { pressed = true; clearTimeout(openTimer); }
+  });
+  document.addEventListener("mouseup", release);
+  document.addEventListener("mousemove", function (e) { if (pressed && !(e.buttons & 1)) release(); });
+
+  var card = document.getElementById("chart");
+  card.addEventListener("mouseenter", function () { clearTimeout(closeTimer); clearTimeout(openTimer); });
+  card.addEventListener("mouseleave", leaveSoon);
 
   window.addEventListener("resize", function () { requestAnimationFrame(measure); });
 
@@ -598,11 +921,12 @@
   }
 
   // ------------------------------------------------------------------ boot
+  loadHistory();
   seedMarket();
   applyChrome();
   syncForm();
   render();
-  resize();
+  layout();
   schedule();
   requestAnimationFrame(frame);
 

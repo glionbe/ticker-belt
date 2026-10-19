@@ -4140,7 +4140,7 @@ dependencies = [
 
 [[package]]
 name = "ticker-belt"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "serde_json",
  "tauri",
