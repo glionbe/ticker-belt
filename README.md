@@ -42,6 +42,18 @@ Every build after that is seconds.
   chart falls back to collected prices and says "Local data".
 - **Settings** — the gear icon. The window grows to make room: downward
   when the bar is near the top of the screen, upward near the bottom.
+- **Keyboard shortcuts** — work from any app, even when the widget doesn't
+  have focus:
+
+  | Default | Does |
+  |---|---|
+  | `Ctrl+Alt+P` | Keep above other windows, on/off (a note on the bar says which) |
+  | `Ctrl+Alt+B` | Show / hide the widget |
+  | `Ctrl+Alt+S` | Open / close settings |
+
+  Change them under Keyboard shortcuts in settings: click a combo, press the
+  new keys (Esc cancels), or Clear to turn one off. If another app already
+  owns a combo, that row says so and the other shortcuts still work.
 - **Quit** — the × icon. The widget stays out of the taskbar, so this is the
   only way out.
 
@@ -149,5 +161,11 @@ src-tauri/
 - **Permissions are explicit.** Calling a new Tauri API from JS means adding
   its permission to `src-tauri/capabilities/default.json` or it fails at
   runtime with a permission error.
+- **Global shortcuts live in Rust.** `main.rs` registers them at launch from
+  `shortcuts.json` in the app's config folder (`%APPDATA%\com.lionberger.tickerbelt`),
+  performs the action, and emits an event so the page can update. The
+  page's `settings.shortcuts` is a mirror; what Rust reports wins.
+- **Test shortcuts with another window focused.** Click into a browser,
+  then press the combo. Testing with the widget focused proves nothing.
 - **If the window renders blank**, the CSP is usually the culprit. Setting
   `"csp": null` in `tauri.conf.json` temporarily will confirm it.

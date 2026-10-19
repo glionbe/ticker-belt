@@ -21,6 +21,8 @@
       <div class="track" id="track"></div>
       <div class="fade fade-l"></div>
       <div class="fade fade-r"></div>
+      <!-- Confirms a shortcut that has no other visible effect (always on top). -->
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
     </div>
 
     <!-- Buttons must sit OUTSIDE any drag region or their clicks get eaten. -->
@@ -152,6 +154,32 @@
         <label class="check"><input type="checkbox" id="ontop"> Keep above other windows</label>
         <label class="check"><input type="checkbox" id="hoverpause"> Stop scrolling on hover</label>
         <label class="check"><input type="checkbox" id="autostart"> Launch at startup</label>
+      </div>
+
+      <div class="field">
+        <span class="name">Keyboard shortcuts</span>
+        <div class="keys" id="keys">
+          <div class="keyRow" data-action="ontop">
+            <span class="keyName">Keep above other windows</span>
+            <button class="keyCap" type="button"></button>
+            <button class="keyClear" type="button" title="Turn this shortcut off">Clear</button>
+            <p class="keyMsg" hidden></p>
+          </div>
+          <div class="keyRow" data-action="toggle">
+            <span class="keyName">Show / hide the widget</span>
+            <button class="keyCap" type="button"></button>
+            <button class="keyClear" type="button" title="Turn this shortcut off">Clear</button>
+            <p class="keyMsg" hidden></p>
+          </div>
+          <div class="keyRow" data-action="settings">
+            <span class="keyName">Open / close settings</span>
+            <button class="keyCap" type="button"></button>
+            <button class="keyClear" type="button" title="Turn this shortcut off">Clear</button>
+            <p class="keyMsg" hidden></p>
+          </div>
+        </div>
+        <p class="hint">These work from any app. Click one and press the new keys;
+          Esc cancels.</p>
       </div>
 
       <div class="foot">

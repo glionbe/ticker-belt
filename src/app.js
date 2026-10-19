@@ -34,7 +34,9 @@
     theme: "dark",
     ontop: true,
     hoverpause: true,
-    autostart: false
+    autostart: false,
+    // Global hotkeys, "" = off. Rust keeps the real copy, see get_shortcuts.
+    shortcuts: { ontop: "Ctrl+Alt+P", toggle: "Ctrl+Alt+B", settings: "Ctrl+Alt+S" }
   };
 
   var SIZES = {
@@ -81,6 +83,12 @@
     });
     s.alerts = alerts;
     if (["1D", "1W", "1M"].indexOf(s.range) < 0) s.range = "1D";
+    // A fresh object either way: DEFAULTS' own must never be edited.
+    var keys = {};
+    for (var a in DEFAULTS.shortcuts) {
+      keys[a] = s.shortcuts && typeof s.shortcuts[a] === "string" ? s.shortcuts[a] : DEFAULTS.shortcuts[a];
+    }
+    s.shortcuts = keys;
     return s;
   }
 
@@ -609,6 +617,149 @@
     } catch (e) {}
   }
 
+  // ------------------------------------------------------ global shortcuts
+  /* The widget almost never has keyboard focus, so these are OS-level
+   * hotkeys, registered and handled in Rust (see main.rs). Rust also keeps
+   * the bindings, since it registers them at launch before this page runs;
+   * settings.shortcuts mirrors them and whatever Rust reports back wins.
+   *
+   * A combo is captured from the next keydown, never typed in. Its key part
+   * comes from KeyboardEvent.code, the physical key, which is what Tauri's
+   * accelerator parser reads, so a binding doesn't shift with the layout.
+   * While a row is capturing, Rust lets go of the current hotkeys; otherwise
+   * pressing one would run its action instead of reaching this page. */
+  var keyErrors = {};      // action -> why Rust couldn't register it
+  var capturing = null;    // { action, msg } while a row waits for keys
+  var toastTimer = null;
+
+  // Keys other than letters, digits, F1-F24 and the numpad, by code -> label.
+  var KEY_NAMES = {
+    Minus: "-", Equal: "=", BracketLeft: "[", BracketRight: "]", Backslash: "\\",
+    Semicolon: ";", Quote: "'", Comma: ",", Period: ".", Slash: "/", Backquote: "`",
+    Space: "Space", Enter: "Enter", Tab: "Tab", Backspace: "Backspace", Delete: "Delete",
+    Insert: "Insert", Home: "Home", End: "End", PageUp: "PageUp", PageDown: "PageDown",
+    ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right"
+  };
+
+  // The accelerator's key part for a KeyboardEvent.code, or null if unusable.
+  function accelKey(code) {
+    var m = /^(?:Key([A-Z])|Digit(\d))$/.exec(code);
+    if (m) return m[1] || m[2];
+    if (/^(?:F(?:[1-9]|1\d|2[0-4])|Numpad\d)$/.test(code)) return code;
+    return KEY_NAMES[code] ? code : null;
+  }
+
+  // Input from remote-desktop or macro tools can arrive with no code; for
+  // the common keys the legacy keyCode still says which one it was.
+  function codeFromKeyCode(k) {
+    if (k >= 65 && k <= 90) return "Key" + String.fromCharCode(k);
+    if (k >= 48 && k <= 57) return "Digit" + (k - 48);
+    if (k >= 112 && k <= 135) return "F" + (k - 111);
+    return "";
+  }
+
+  // "Ctrl+Alt+BracketLeft" -> "Ctrl+Alt+["
+  function keyLabel(accel) {
+    if (!accel) return "Off";
+    var parts = accel.split("+"), k = parts.pop();
+    return parts.concat(KEY_NAMES[k] || k.replace(/^Numpad/, "Num")).join("+");
+  }
+
+  // { accel } for a usable combo, { why } for one to refuse, or { wait }
+  // while only modifiers are down.
+  function comboOf(e) {
+    if (e.metaKey || e.key === "Meta" || e.key === "OS") {
+      return { why: "Windows keeps Win+ shortcuts for itself. Try Ctrl+Alt instead." };
+    }
+    if (["Control", "Alt", "Shift", "AltGraph"].indexOf(e.key) >= 0) return { wait: true };
+    var key = accelKey(e.code || codeFromKeyCode(e.keyCode));
+    if (!key) return { why: "That key can't be used in a shortcut." };
+    if (!e.ctrlKey && !e.altKey) return { why: "Include Ctrl or Alt, so it doesn't get in the way of typing." };
+    var mods = [];
+    if (e.ctrlKey) mods.push("Ctrl");
+    if (e.altKey) mods.push("Alt");
+    if (e.shiftKey) mods.push("Shift");
+    return { accel: mods.concat(key).join("+") };
+  }
+
+  function renderKeys() {
+    Array.prototype.forEach.call(document.querySelectorAll(".keyRow"), function (row) {
+      var a = row.dataset.action, accel = settings.shortcuts[a] || "";
+      var here = !!capturing && capturing.action === a;
+      var text = here ? capturing.msg : (keyErrors[a] ? "Not active: " + keyErrors[a] : "");
+      var cap = row.querySelector(".keyCap"), msg = row.querySelector(".keyMsg");
+      cap.textContent = here ? "Press keys…" : keyLabel(accel);
+      cap.classList.toggle("capturing", here);
+      cap.classList.toggle("off", !accel && !here);
+      cap.title = here ? "Esc cancels" : "Click to change";
+      cap.setAttribute("aria-label", row.querySelector(".keyName").textContent + ": " +
+        (here ? "press the new keys, Esc cancels" : keyLabel(accel) + ". Click to change"));
+      row.querySelector(".keyClear").disabled = !accel;
+      row.classList.toggle("bad", !!text);
+      msg.hidden = !text;
+      msg.textContent = text;
+    });
+  }
+
+  // Rust's answer to get/set/resume: the bindings it holds and what failed.
+  function gotShortcuts(r) {
+    if (!r || !r.binds) return;
+    for (var a in DEFAULTS.shortcuts) if (typeof r.binds[a] === "string") settings.shortcuts[a] = r.binds[a];
+    keyErrors = r.errors || {};
+    save(); renderKeys();
+  }
+
+  function startCapture(action) {
+    if (capturing && capturing.action === action) return;
+    var paused = !!capturing;
+    capturing = { action: action, msg: "" };
+    renderKeys();
+    if (!paused && invoke) invoke("pause_shortcuts").catch(function () {});
+  }
+
+  // Cancelled (Esc, clicked away, panel closed): put the current set back.
+  function endCapture() {
+    if (!capturing) return;
+    capturing = null;
+    renderKeys();
+    if (invoke) invoke("resume_shortcuts").then(gotShortcuts).catch(function () {});
+  }
+
+  function setShortcut(action, accel) {
+    capturing = null;
+    settings.shortcuts[action] = accel;
+    save(); renderKeys();
+    if (invoke) invoke("set_shortcuts", { binds: settings.shortcuts }).then(gotShortcuts).catch(function () {});
+  }
+
+  function captureKey(e) {
+    if (!capturing) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === "Escape") { endCapture(); return; }
+    var c = comboOf(e);
+    if (c.wait) return;
+    if (!c.why) {
+      for (var a in settings.shortcuts) {
+        if (a !== capturing.action && settings.shortcuts[a] === c.accel) {
+          var other = document.querySelector('.keyRow[data-action="' + a + '"] .keyName').textContent;
+          c.why = keyLabel(c.accel) + " is already used for " + other.toLowerCase() + ".";
+        }
+      }
+    }
+    if (c.why) { capturing.msg = c.why; renderKeys(); return; }   // keep listening
+    setShortcut(capturing.action, c.accel);
+  }
+
+  // A brief note over the tape, for a shortcut with nothing else to show.
+  function toast(text) {
+    var el = document.getElementById("toast");
+    el.textContent = text;
+    el.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.classList.remove("show"); }, 1200);
+  }
+
   // ------------------------------------------------------------- rendering
   function money(n) {
     return n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -944,6 +1095,7 @@
 
   function togglePanel(open) {
     panelOpen = open === undefined ? !panelOpen : open;
+    if (!panelOpen) endCapture();
     if (panelOpen && chart) {             // settings takes the room, see the hover chart
       clearTimeout(closeTimer);
       chart = null;
@@ -968,6 +1120,7 @@
     document.getElementById("ontop").checked = !!settings.ontop;
     document.getElementById("hoverpause").checked = !!settings.hoverpause;
     document.getElementById("autostart").checked = !!settings.autostart;
+    renderKeys();
 
     [["dir","dir"],["size","size"],["chg","chg"],["theme","theme"],
      ["width","width"],["refresh","refresh"]]
@@ -1021,7 +1174,27 @@
   // The tray's "Settings" item shows the window and asks us to open the panel.
   if (TAURI && TAURI.event) {
     TAURI.event.listen("open-settings", function () { togglePanel(true); }).catch(function () {});
+
+    // Global shortcuts: Rust has already done the action, this is the UI.
+    TAURI.event.listen("ontop-changed", function (e) {
+      settings.ontop = !!e.payload;
+      save();
+      document.getElementById("ontop").checked = settings.ontop;
+      toast("Always on top: " + (settings.ontop ? "on" : "off"));
+    }).catch(function () {});
+    TAURI.event.listen("toggle-settings", function () {
+      togglePanel();
+      if (panelOpen && win) win.setFocus().catch(function () {});   // ready to type in
+    }).catch(function () {});
   }
+
+  document.addEventListener("keydown", captureKey, true);
+  Array.prototype.forEach.call(document.querySelectorAll(".keyRow"), function (row) {
+    var a = row.dataset.action, cap = row.querySelector(".keyCap");
+    cap.addEventListener("click", function () { startCapture(a); });
+    cap.addEventListener("blur", endCapture);   // clicked elsewhere, or the window lost focus
+    row.querySelector(".keyClear").addEventListener("click", function () { setShortcut(a, ""); });
+  });
 
   document.getElementById("symbols").addEventListener("change", function (e) {
     var list = readSymbols(e.target.value);
@@ -1083,10 +1256,12 @@
     var keepKey = settings.apiKey;           // resetting layout shouldn't log you out
     var keepTd = settings.tdKey;
     var keepAuto = settings.autostart;       // ...or desync us from the OS startup entry
+    var keepKeys = settings.shortcuts;       // ...or from the hotkeys Rust has registered
     settings = JSON.parse(JSON.stringify(DEFAULTS));
     settings.apiKey = keepKey;
     settings.tdKey = keepTd;
     settings.autostart = keepAuto;
+    settings.shortcuts = keepKeys;
     market = {}; save(); saveAlertState(); seedMarket(); applyChrome(); syncForm(); render(); layout(); schedule();
   });
 
@@ -1146,6 +1321,8 @@
     invoke("get_autostart").then(function (on) {
       if (on !== settings.autostart) { settings.autostart = on; save(); syncForm(); }
     }).catch(function () {});
+    // Likewise the hotkeys: what Rust registered at launch, and what failed.
+    invoke("get_shortcuts").then(gotShortcuts).catch(function () {});
   }
 
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(measure);
