@@ -48,6 +48,15 @@
         <div class="hilo"><span id="cHi"></span><span id="cLo"></span></div>
         <div class="collecting">Collecting data…<span id="cWhen"></span></div>
       </div>
+      <!-- Only shown with a Twelve Data key. -->
+      <div class="chartFoot">
+        <div class="seg" id="cRange">
+          <button data-v="1D" aria-pressed="false">1D</button>
+          <button data-v="1W" aria-pressed="false">1W</button>
+          <button data-v="1M" aria-pressed="false">1M</button>
+        </div>
+        <span class="chartNote" id="cNote"></span>
+      </div>
     </div>
   </div>
 
@@ -66,6 +75,13 @@
         <input type="password" id="apikey" spellcheck="false" placeholder="Leave empty for demo prices">
         <p class="hint">Free key at finnhub.io/register. Without one the widget
           shows simulated prices.</p>
+      </div>
+
+      <div class="field">
+        <label class="name" for="tdkey">Twelve Data API key</label>
+        <input type="password" id="tdkey" spellcheck="false" placeholder="Optional">
+        <p class="hint">Free key at twelvedata.com. Optional: enables full-day
+          charts when you hover a quote.</p>
       </div>
 
       <div class="field">

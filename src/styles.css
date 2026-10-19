@@ -260,3 +260,9 @@ input:focus-visible, button:focus-visible { outline: 2px solid var(--ink); outli
 .collecting span:empty { display: none; }
 .chart.empty .collecting { display: flex; }
 .chart.empty svg, .chart.empty .hilo { visibility: hidden; }
+
+/* Range picker and fallback note: only with a Twelve Data key. */
+.chartFoot { display: none; align-items: center; justify-content: space-between; gap: 8px; margin-top: 9px; }
+.chart.ranged .chartFoot { display: flex; }
+.chartFoot .seg button { flex: none; padding: 3px 10px; font-size: 11px; }
+.chartNote { font-size: 10.5px; color: var(--muted); white-space: nowrap; }

@@ -35,6 +35,11 @@ Every build after that is seconds.
 - **Chart** — hover a quote for a moment to see today's price line. It
   draws from prices the widget has seen while the market was open, so it
   fills in as the day goes on. The belt holds still while it's open.
+  With a free Twelve Data key (settings, optional) the chart shows the
+  full day from the API instead, plus 1W and 1M ranges. Requests stay
+  inside the free tier: cached, at most 8 a minute and 700 a day, and
+  only for the quote you're hovering. If Twelve Data can't answer, the
+  chart falls back to collected prices and says "Local data".
 - **Settings** — the gear icon. The window grows to make room: downward
   when the bar is near the top of the screen, upward near the bottom.
 - **Quit** — the × icon. The widget stays out of the taskbar, so this is the

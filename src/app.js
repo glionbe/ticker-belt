@@ -22,6 +22,8 @@
     symbols: ["AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","JPM","V","SPY"],
     alerts: {},             // { NVDA: ">150" } — only symbols that have a target
     apiKey: "",
+    tdKey: "",              // Twelve Data, optional: real chart history
+    range: "1D",            // hover chart range, used with tdKey
     refresh: 30,
     speed: 55,
     opacity: 92,
@@ -78,6 +80,7 @@
       if (typeof t === "string" && parseTarget(t)) alerts[sym] = t;
     });
     s.alerts = alerts;
+    if (["1D", "1W", "1M"].indexOf(s.range) < 0) s.range = "1D";
     return s;
   }
 
@@ -354,6 +357,186 @@
     return rec && rec.day === sessionDay(new Date()) ? rec.pts : [];
   }
 
+  // ----------------------------------------------------------- twelve data
+  /* Optional real history for the hover chart, with 1D / 1W / 1M ranges.
+   * Used only with a Twelve Data key AND live Finnhub quotes: on demo prices
+   * the header would contradict a real chart. Without it, or whenever it
+   * can't be had, the chart uses the self-collected history above.
+   *
+   * The free tier is 8 requests a minute and 800 a day (one per symbol per
+   * request), and a hover along the belt could spend that in seconds, so:
+   *   - responses are cached per symbol and range for TD_RANGES[r].ttl;
+   *   - a request goes out only for the chart that's open, never ahead;
+   *   - at most TD_PER_MIN in any rolling minute and TD_PER_DAY per Eastern
+   *     day (under the 800 wall), counted in localStorage so a restart
+   *     doesn't reset them. Over budget nothing is queued: the chart shows
+   *     stale cache or local data until there's room;
+   *   - a symbol/range that failed waits TD_RETRY before it's tried again.
+   *
+   * Errors arrive as HTTP 200 with status "error", so the body decides. */
+  var TD_STORE = "tickerbelt.twelvedata.v1";   // the request budget
+  var TD_RANGES = {
+    "1D": { interval: "5min",  size: 78, ms: 5 * 60e3,  ttl: 5 * 60e3 },
+    "1W": { interval: "30min", size: 65, ms: 30 * 60e3, ttl: 60 * 60e3 },
+    "1M": { interval: "1day",  size: 22, ms: 86400e3,   ttl: 4 * 60 * 60e3 }
+  };
+  var TD_PER_MIN = 8, TD_PER_DAY = 700, TD_RETRY = 60e3;
+  var tdCache = {};     // "AAPL|1D" -> { pts, at }
+  var tdState = {};     // "AAPL|1D" -> { busy, failedAt, why }
+  var tdKeyBad = false; // rejected; no more requests until the key changes
+  var tdBudget = loadBudget();
+  var ET_FULL = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York", hourCycle: "h23", year: "numeric", month: "2-digit",
+    day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit"
+  });
+
+  function tdOn() { return live() && !!settings.tdKey; }
+
+  // The New York wall-clock time at instant t, written as if it were UTC.
+  function easternAsUTC(t) {
+    var o = {};
+    ET_FULL.formatToParts(new Date(t)).forEach(function (p) { o[p.type] = p.value; });
+    return Date.UTC(+o.year, o.month - 1, +o.day, +o.hour % 24, +o.minute, +o.second);
+  }
+
+  /* "2026-10-16 15:55:00" is New York time with no zone on it; new Date()
+   * would read it as local time, an hour off from Central. Start from the
+   * digits as UTC and correct by New York's offset at that moment (twice,
+   * in case the first guess sits across a DST change). A date with no time
+   * is a daily bar, placed at the close. */
+  function fromEastern(s) {
+    var m = /^(\d{4})-(\d\d)-(\d\d)(?:[ T](\d\d):(\d\d)(?::(\d\d))?)?$/.exec(s || "");
+    if (!m) return NaN;
+    var wall = Date.UTC(+m[1], m[2] - 1, +m[3], m[4] ? +m[4] : 16, +(m[5] || 0), +(m[6] || 0));
+    var t = wall;
+    for (var i = 0; i < 2; i++) t = wall - (easternAsUTC(t) - t);
+    return t;
+  }
+
+  function loadBudget() {
+    try {
+      var b = JSON.parse(localStorage.getItem(TD_STORE));
+      if (b && typeof b.count === "number" && Array.isArray(b.recent)) return b;
+    } catch (e) {}
+    return { day: "", count: 0, recent: [] };
+  }
+
+  // Why a request can't go out now, or "" if it can.
+  function tdBlocked() {
+    var now = Date.now(), day = etDate(now);
+    if (tdBudget.day !== day) { tdBudget.day = day; tdBudget.count = 0; }   // midnight Eastern
+    tdBudget.recent = tdBudget.recent.filter(function (t) { return now - t < 60e3; });
+    if (tdBudget.count >= TD_PER_DAY) return "Daily Twelve Data budget used up.";
+    if (tdBudget.recent.length >= TD_PER_MIN) return "Twelve Data rate limit, retrying shortly.";
+    return "";
+  }
+
+  function tdSpend() {
+    tdBudget.recent.push(Date.now());
+    tdBudget.count++;
+    try { localStorage.setItem(TD_STORE, JSON.stringify(tdBudget)); } catch (e) {}
+  }
+
+  function tdWhy(body, sym) {
+    var code = body && body.code;
+    if (code === 401 || code === 403) return "Twelve Data rejected the key.";
+    if (code === 429) return "Twelve Data rate limit, retrying shortly.";
+    if (code === 400 || code === 404) return "Twelve Data has no data for " + sym + ".";
+    return "Twelve Data returned an error.";
+  }
+
+  // Start a fetch for this chart if it needs one and the budget allows.
+  function tdRequest(sym, range) {
+    var k = sym + "|" + range, r = TD_RANGES[range], now = Date.now();
+    var st = tdState[k] || (tdState[k] = {}), hit = tdCache[k];
+    if (hit && now - hit.at < r.ttl) return;
+    if (st.busy || (st.failedAt && now - st.failedAt < TD_RETRY)) return;
+    if (tdKeyBad) { st.why = tdWhy({ code: 401 }); return; }
+    var blocked = tdBlocked();
+    if (blocked) { st.why = blocked; return; }
+
+    st.busy = true;
+    tdSpend();
+    var key = settings.tdKey;
+    fetch("https://api.twelvedata.com/time_series?symbol=" + encodeURIComponent(sym) +
+          "&interval=" + r.interval + "&outputsize=" + r.size + "&apikey=" + encodeURIComponent(key))
+      .then(function (res) { return res.json(); })
+      .then(function (body) {
+        if (!body || body.status !== "ok" || !Array.isArray(body.values)) {
+          if (body && (body.code === 401 || body.code === 403) && key === settings.tdKey) tdKeyBad = true;
+          throw new Error(tdWhy(body, sym));
+        }
+        // Sent newest first. Sorted rather than reversed, so order can't bite.
+        var pts = body.values
+          .map(function (v) { return [fromEastern(v.datetime), Number(v.close)]; })
+          .filter(function (p) { return p[0] > 0 && p[1] > 0; })
+          .sort(function (a, b) { return a[0] - b[0]; });
+        if (!pts.length) throw new Error(tdWhy({ code: 404 }, sym));
+        if (key !== settings.tdKey) return;            // key changed while in flight
+        tdCache[k] = { pts: pts, at: Date.now() };
+        st.failedAt = 0; st.why = "";
+      })
+      .catch(function (e) {
+        st.failedAt = Date.now();
+        st.why = e instanceof TypeError ? "Couldn't reach Twelve Data." : e.message;
+      })
+      .then(function () {
+        st.busy = false;
+        if (chart && chart.sym === sym && settings.range === range) drawChart();
+      });
+  }
+
+  /* What the chart should draw: points, how x is laid out, the reference
+   * line, the direction for the color, and a note when it had to fall back.
+   *   x "session": the trading day, 9:30 to 16:00, so 1D fills in across.
+   *   x "data":    first to last point (demo ticks are seconds apart).
+   *   x "index":   evenly spaced, so 1W/1M skip nights and weekends. */
+  function chartSeries(sym, m, cls) {
+    var local = { pts: seriesFor(sym), x: live() ? "session" : "data", base: m.prev, dir: cls, note: "" };
+    if (!tdOn()) return local;
+
+    var range = settings.range, r = TD_RANGES[range], k = sym + "|" + range;
+    tdRequest(sym, range);
+    var hit = tdCache[k], st = tdState[k] || {};
+    var pts = hit ? hit.pts.slice() : null, now = Date.now();
+
+    if (pts && range === "1D") {
+      // 78 bars can reach back into the day before; keep the last session.
+      // If that isn't today's session (data lagging the open), use local.
+      var day = etDate(pts[pts.length - 1][0]);
+      pts = pts.filter(function (p) { return etDate(p[0]) === day; });
+      if (day !== sessionDay(new Date())) pts = null;
+    }
+
+    if (!pts) {
+      local.note = st.busy ? "Loading…" : "Local data";
+      local.why = st.busy ? "" : (st.why || "Twelve Data unavailable.") +
+        (range === "1D" ? " Showing prices collected today." : " Showing today's collected prices.");
+      return local;
+    }
+
+    // End on the live price, so the line finishes where the header does.
+    var last = pts[pts.length - 1];
+    if (range === "1D") {
+      // Bars lag; fill the gap with what we've collected since, then live.
+      seriesFor(sym).forEach(function (p) { if (p[0] > last[0]) pts.push(p); });
+      var close = fromEastern(etDate(last[0]));   // 16:00 that day
+      pts.push([Math.max(pts[pts.length - 1][0], Math.min(now, close)), m.last]);
+      return { pts: pts, x: "session", base: m.prev, dir: cls, note: "" };
+    }
+    // 1W / 1M: the live price replaces the latest bar's close if that bar is
+    // from the current session and still open (or the market has closed);
+    // otherwise, say a new day with no bar yet, it's a point of its own.
+    var current = etDate(last[0]) === sessionDay(new Date());
+    if (current && (!marketOpen() || now - last[0] < r.ms)) pts[pts.length - 1] = [last[0], m.last];
+    else pts.push([now, m.last]);
+    var first = pts[0][1], d = m.last - first;
+    return {
+      pts: pts, x: "index", base: first, note: "",
+      dir: d > first * 1e-5 ? "up" : (d < -first * 1e-5 ? "down" : "flat")
+    };
+  }
+
   // ---------------------------------------------------------- price alerts
   /* Each alert is either armed (price on the near side of the target) or
    * triggered (it has crossed). It notifies only on armed -> triggered, then
@@ -600,16 +783,25 @@
     if (!chart) return;
     var sym = chart.sym, m = market[sym];
     if (!m || m.bad) { closeChart(); return; }
-    var c = changeOf(m), pts = seriesFor(sym);
+    var c = changeOf(m), s = chartSeries(sym, m, c.cls), pts = s.pts;
     var card = document.getElementById("chart");
     var svg = document.getElementById("cSvg");
 
-    card.setAttribute("data-dir", c.cls);
+    card.setAttribute("data-dir", s.dir);
     document.getElementById("cSym").textContent = sym;
     document.getElementById("cPx").textContent = c.px;
     var chg = document.getElementById("cChg");
     chg.textContent = c.text;
     chg.className = "chg " + c.cls;
+
+    // Ranges only exist with Twelve Data; without it the card is as before.
+    card.classList.toggle("ranged", tdOn());
+    Array.prototype.forEach.call(document.querySelectorAll("#cRange button"), function (b) {
+      b.setAttribute("aria-pressed", String(b.dataset.v === settings.range));
+    });
+    var note = document.getElementById("cNote");
+    note.textContent = s.note;
+    note.title = s.why || "";
 
     // Fewer than three points isn't a line yet.
     var enough = pts.length >= 3;
@@ -622,10 +814,9 @@
     var w = svg.clientWidth, h = svg.clientHeight, inset = 3;
     svg.setAttribute("viewBox", "0 0 " + w + " " + h);
 
-    // On live data x spans the whole session, so the line works its way
-    // across as the day goes on. Demo ticks are seconds apart: fit the data.
+    // See chartSeries() for the three x layouts.
     var t0 = pts[0][0], t1 = pts[pts.length - 1][0];
-    if (live()) {
+    if (s.x === "session") {
       var open = t0 - (easternNow(new Date(t0)).secs - OPEN_SECS) * 1000;
       t0 = Math.min(t0, open);
       t1 = Math.max(t1, open + (CLOSE_SECS - OPEN_SECS) * 1000);
@@ -635,16 +826,20 @@
     pts.forEach(function (p) { lo = Math.min(lo, p[1]); hi = Math.max(hi, p[1]); });
     document.getElementById("cHi").textContent = money(hi);
     document.getElementById("cLo").textContent = money(lo);
-    // Keep the previous close in frame so its line always shows.
-    var prev = m.prev > 0 ? m.prev : null;
+    // Keep the reference (previous close, or the range's start) in frame.
+    var prev = s.base > 0 ? s.base : null;
     var top = prev ? Math.max(hi, prev) : hi, bot = prev ? Math.min(lo, prev) : lo;
     if (top - bot < top * 1e-6) { top *= 1.001; bot *= 0.999; }   // flat: centre it
 
-    function X(t) { return ((t - t0) / ((t1 - t0) || 1) * w).toFixed(1); }
+    function X(t, i) {
+      var f = s.x === "index" ? i / (pts.length - 1) : (t - t0) / ((t1 - t0) || 1);
+      return (f * w).toFixed(1);
+    }
     function Y(p) { return (inset + (top - p) / (top - bot) * (h - inset * 2)).toFixed(1); }
 
-    var line = pts.map(function (p, i) { return (i ? "L" : "M") + X(p[0]) + " " + Y(p[1]); }).join("");
-    var area = line + "L" + X(pts[pts.length - 1][0]) + " " + h + "L" + X(pts[0][0]) + " " + h + "Z";
+    var n = pts.length - 1;
+    var line = pts.map(function (p, i) { return (i ? "L" : "M") + X(p[0], i) + " " + Y(p[1]); }).join("");
+    var area = line + "L" + X(pts[n][0], n) + " " + h + "L" + X(pts[0][0], 0) + " " + h + "Z";
 
     var grad = svgEl("linearGradient", { id: "cFade", x1: 0, y1: 0, x2: 0, y2: 1 });
     grad.appendChild(svgEl("stop", { offset: 0, "class": "fade0" }));
@@ -765,6 +960,7 @@
     document.getElementById("symbols").value = settings.symbols
       .map(function (s) { return s + (settings.alerts[s] || ""); }).join(", ");
     document.getElementById("apikey").value = settings.apiKey;
+    document.getElementById("tdkey").value = settings.tdKey;
     document.getElementById("speed").value = settings.speed;
     document.getElementById("speedVal").textContent = settings.speed;
     document.getElementById("opacity").value = settings.opacity;
@@ -843,6 +1039,12 @@
     save(); seedMarket(); schedule();
   });
 
+  document.getElementById("tdkey").addEventListener("change", function (e) {
+    settings.tdKey = e.target.value.trim();
+    tdCache = {}; tdState = {}; tdKeyBad = false;   // all of that was about the old key
+    save();
+  });
+
   document.getElementById("speed").addEventListener("input", function (e) {
     settings.speed = Number(e.target.value);
     document.getElementById("speedVal").textContent = settings.speed;
@@ -879,9 +1081,11 @@
 
   document.getElementById("reset").addEventListener("click", function () {
     var keepKey = settings.apiKey;           // resetting layout shouldn't log you out
+    var keepTd = settings.tdKey;
     var keepAuto = settings.autostart;       // ...or desync us from the OS startup entry
     settings = JSON.parse(JSON.stringify(DEFAULTS));
     settings.apiKey = keepKey;
+    settings.tdKey = keepTd;
     settings.autostart = keepAuto;
     market = {}; save(); saveAlertState(); seedMarket(); applyChrome(); syncForm(); render(); layout(); schedule();
   });
@@ -901,6 +1105,12 @@
   var card = document.getElementById("chart");
   card.addEventListener("mouseenter", function () { clearTimeout(closeTimer); clearTimeout(openTimer); });
   card.addEventListener("mouseleave", leaveSoon);
+  document.getElementById("cRange").addEventListener("click", function (e) {
+    var b = e.target.closest("button");
+    if (!b || b.dataset.v === settings.range) return;
+    settings.range = b.dataset.v;
+    save(); drawChart();          // fetches if this range isn't cached fresh
+  });
 
   window.addEventListener("resize", function () { requestAnimationFrame(measure); });
 
